@@ -12,7 +12,7 @@ class SearchResult:
     url: str
 
 
-def search_notes(query: str, limit: int = 25, include_trashed: bool = False) -> list[SearchResult]:
+def search_notes(query: str, limit: int = 10, include_trashed: bool = False) -> list[SearchResult]:
     """Search stored notes and return the matches, newest first."""
     raise NotImplementedError
 
