@@ -7,7 +7,7 @@ inputs:
     description: TypeSafe API key. Store it as a repository secret and pass it in.
     required: true
   docs:
-    description: Space-separated docs to check. Default: Markdown at the repo root and under docs/.
+    description: 'Space-separated docs to check. Defaults to Markdown at the repo root and under docs/.'
     required: false
     default: ''
   comment:
