@@ -103,10 +103,23 @@ def main():
     post = verify([dict(u) for u in claims], bm25(text_windows(after)))
     pre = {(u["doc"], u["line"]): u for u in verify([dict(u) for u in claims], bm25(text_windows(before)))} if before else {}
 
+    # Only an incremental run can do this: a symbol the docs name that the code had before and
+    # does not have now was renamed or removed. Pure text, no model, and no false alarms from
+    # symbols that belong to a dependency — those were never in the tree to begin with.
+    seen = {}
+
+    def in_tree(rev, sym):
+        if (rev, sym) not in seen:
+            hits = git(repo, "grep", "-l", "-F", "--", sym, rev, check=False).split("\n")
+            seen[(rev, sym)] = any(is_code(h.split(":", 1)[-1]) for h in hits if h.strip())
+        return seen[(rev, sym)]
+
     findings = []
     for u in post:
         was = pre.get((u["doc"], u["line"]), {}).get("status", "absent")
-        if u["status"] == "DRIFT" and was != "DRIFT":
+        u["vanished"] = [s for s in re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])
+                         if s in touched and in_tree(a.base, s) and not in_tree(a.head, s)]
+        if u["vanished"] or (u["status"] == "DRIFT" and was != "DRIFT"):
             u["before"] = was
             findings.append(u)
     stats["findings"] = len(findings)
@@ -116,15 +129,20 @@ def main():
         lines.append(f"This change appears to make **{len(findings)}** documented "
                      f"{'claim' if len(findings) == 1 else 'claims'} out of date:")
         lines.append("")
-        for u in sorted(findings, key=lambda u: -u["p_contradicted"]):
+        for u in sorted(findings, key=lambda u: (not u["vanished"], -u["p_contradicted"])):
             ev = max(u["evidence"], key=lambda e: min(e["p"]["contradicted"], e["p"]["same"]), default=None)
             where = f"`{ev['file']}` (around line {ev['start']})" if ev else "the changed code"
+            if u["vanished"]:
+                why = ("This change removed or renamed "
+                       + ", ".join(f"`{s}`" for s in u["vanished"])
+                       + ", which this line documents."
+                       + (f" It also now reads as contradicted by {where} (conflict {u['p_contradicted']:.2f})."
+                          if u["status"] == "DRIFT" else ""))
+            else:
+                why = (f"Now contradicted by {where}. Conflict {u['p_contradicted']:.2f}, "
+                       f"support {u['p_supported']:.2f} (before this change: {u['before']}).")
             lines += [f"**[{u['doc']}:{u['line']}]({u['doc']}#L{u['line']})** — under _{' > '.join(u['context'][-2:]) or 'top level'}_",
-                      "", f"> {u['text'][:400]}", "",
-                      f"Now contradicted by {where}. "
-                      f"Conflict {u['p_contradicted']:.2f}, support {u['p_supported']:.2f}"
-                      + (f", missing symbols: {', '.join('`%s`' % s for s in u['missing_symbols'])}" if u.get("missing_symbols") else "")
-                      + f" (before this change: {u['before']}).", ""]
+                      "", f"> {u['text'][:400]}", "", why, ""]
         lines.append("<sub>Each finding is a model judgment with its probability, not a verdict — "
                      "check the cited code before acting. Claims already stale before this change are not reported.</sub>")
     else:
