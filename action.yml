@@ -1,0 +1,77 @@
+name: Doc drift check
+description: Flag documentation that this pull request's code changes made out of date.
+author: zk-hypersolid
+
+inputs:
+  api-key:
+    description: TypeSafe API key. Store it as a repository secret and pass it in.
+    required: true
+  docs:
+    description: Space-separated docs to check. Default: Markdown at the repo root and under docs/.
+    required: false
+    default: ''
+  comment:
+    description: Post the report as a pull request comment (needs pull-requests:write).
+    required: false
+    default: 'true'
+  fail-on-finding:
+    description: Fail the job when the check finds stale documentation.
+    required: false
+    default: 'false'
+  max-claims:
+    description: Cap on how many documented claims one run verifies.
+    required: false
+    default: '60'
+
+outputs:
+  findings:
+    description: Number of documented claims this change appears to have made stale.
+    value: ${{ steps.check.outputs.findings }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - id: check
+      shell: bash
+      env:
+        TYPESAFE_API_KEY: ${{ inputs.api-key }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        if [ -z "$TYPESAFE_API_KEY" ]; then
+          echo "::error::api-key is empty. Add a TYPESAFE_API_KEY repository secret and pass it as the api-key input."
+          exit 1
+        fi
+        git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+        python3 "${{ github.action_path }}/docdrift/pr.py" \
+          --base "$BASE_SHA" --head "$HEAD_SHA" \
+          --report "$RUNNER_TEMP/drift-report.md" \
+          --max-claims "${{ inputs.max-claims }}" \
+          ${{ inputs.docs != '' && format('--docs {0}', inputs.docs) || '' }} \
+          ${{ inputs.fail-on-finding == 'true' && '--fail-on-finding' || '' }}
+
+    - if: ${{ always() && inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        [ -f "$RUNNER_TEMP/drift-report.md" ] || exit 0
+        printf '<!-- doc-drift-check -->\n' > "$RUNNER_TEMP/body.md"
+        cat "$RUNNER_TEMP/drift-report.md" >> "$RUNNER_TEMP/body.md"
+        # One comment per pull request: edit the previous one instead of stacking new ones.
+        id=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+               --paginate -q '.[] | select(.body | startswith("<!-- doc-drift-check -->")) | .id' | head -1)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$id" -F body=@"$RUNNER_TEMP/body.md" >/dev/null
+        else
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -F body=@"$RUNNER_TEMP/body.md" >/dev/null
+        fi
+
+branding:
+  icon: alert-triangle
+  color: orange
