@@ -12,13 +12,13 @@ class SearchResult:
     url: str
 
 
-def search_notes(query: str, limit: int = 10, include_archived: bool = False) -> list[SearchResult]:
+def search_notes(query: str, limit: int = 25, include_trashed: bool = False) -> list[SearchResult]:
     """Search stored notes and return the matches, newest first."""
     raise NotImplementedError
 
 
-def export_notes(notebook: str, fmt: str = "markdown") -> bytes:
-    """Export a whole notebook. Supported formats: markdown, html."""
+def export_notes(notebook: str, fmt: str) -> bytes:
+    """Export a whole notebook. Supported formats: markdown, html, pdf. There is no default."""
     raise NotImplementedError
 
 
