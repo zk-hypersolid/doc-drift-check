@@ -55,6 +55,40 @@ Get a key at [typesafe.ai](https://typesafe.ai) and store it as a repository sec
 The job also writes the report to the run summary and emits a `::warning` annotation per finding,
 so `comment: false` still gives you everything except the comment.
 
+### Pull requests from forks
+
+GitHub does not give secrets to workflows triggered by a pull request from a fork, so on those runs
+`api-key` arrives empty and the job fails with a message saying so. That is deliberate — a silent
+skip would look like a clean check. Pick one:
+
+```yaml
+      # Skip forks, and keep the check for branches in this repository.
+      - uses: zk-hypersolid/doc-drift-check@v1
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          api-key: ${{ secrets.TYPESAFE_API_KEY }}
+```
+
+```yaml
+      # Or run it everywhere and let the fork case pass without a report.
+      - uses: zk-hypersolid/doc-drift-check@v1
+        continue-on-error: true
+        with:
+          api-key: ${{ secrets.TYPESAFE_API_KEY }}
+```
+
+`pull_request_target` would give forks the secret, but it runs the fork's own code with your
+credentials. Do not use it for this.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests   # no network, no dependencies
+```
+
+The suite stubs out the model and covers document parsing, which lines a diff puts in scope, the
+deterministic symbol rules, the before/after policy and the rendered report.
+
 ## How it works
 
 Ordinary code does the parts ordinary code is good at: splitting Markdown into claims, matching
