@@ -11,7 +11,21 @@ from pathlib import Path
 
 API = "https://api.typesafe.ai/v1/systemone"
 CACHE = Path(os.environ.get("DOCDRIFT_CACHE", Path(__file__).parent / ".cache"))
-CODE_EXT = {".py", ".ts", ".js", ".go", ".rs", ".json", ".toml"}
+# Deliberately wide. A documented claim can point at a systemd unit, a shell script, a SQL
+# migration or a compose file just as easily as at a function, and a narrow allowlist turns
+# those into false "this symbol does not exist" alarms. Override with DOCDRIFT_CODE_EXT.
+CODE_EXT = set((os.environ.get("DOCDRIFT_CODE_EXT") or
+                ".py .ts .tsx .js .jsx .mjs .cjs .go .rs .sol .rb .java .kt .swift .c .h .cpp .cs .php .scala "
+                ".sh .bash .zsh .sql .service .timer .socket .proto .graphql .tf .hcl "
+                ".toml .yaml .yml .ini .cfg .conf .env .example").split())
+# Deliberately NOT .json by default. Manifest and marketplace-listing files (server.json,
+# manifest.json, a store submission) mostly restate the documentation in another format, so a
+# conflict with one is two documents disagreeing, not documentation disagreeing with code.
+# Add it back with DOCDRIFT_CODE_EXT when a project really does keep behavior in JSON.
+# Files that carry configuration or build steps but have no extension to match on.
+CODE_NAMES = {"Dockerfile", "Makefile", "Procfile", "Justfile", "justfile", "makefile"}
+NOT_CODE_NAMES = {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "uv.lock",
+                  "Cargo.lock", "composer.lock", "tsconfig.json", "package.json"}
 SKIP_DIRS = {"node_modules", "dist", "build", ".git", "__tests__", "tests", "test", ".venv"}
 USAGE = Counter()
 
@@ -75,7 +89,29 @@ def doc_units(path, text=None):
     return units
 
 
-# ---------- 2. Jev: which units are verifiable claims about the code? ----------
+# ---------- 2a. Jev: what kind of document is this? ----------
+
+DOC_GENRE = {
+    "reference": "Documents this project's own interface or current behavior so a reader can use it: tools, commands, functions, parameters, configuration keys, defaults, return values, operational steps. What it states should already be true of the code in this repository.",
+    "specification": "States what the system should do — requirements, product scope, policy, design decisions, acceptance criteria, planned phases. It may describe behavior that is intended but not built yet, so it can legitimately run ahead of the code.",
+    "third_party": "Mostly about software outside this repository: another protocol, a competitor, a vendor's API, or research notes on how other products work. Names in it belong to those other systems.",
+    "process": "About how people work rather than what the software does: contributing, review, governance, changelogs, meeting or decision records, licensing.",
+}
+
+
+def classify_doc(path, text):
+    """One question per document. Genre decides whether verifying its lines makes sense at all:
+    a competitor write-up names other people's functions, and a specification is allowed to
+    describe behavior the code has not caught up with."""
+    head = "\n".join(text.split("\n")[:80])[:4000]
+    a = ask({"document": {"path": str(path), "beginning": head, "length_lines": len(text.split("\n"))}},
+            {"genre": {"type": "choice",
+                       "instructions": "`document` is a Markdown file from a software repository, shown by path and opening section. What kind of document is it, taken as a whole?",
+                       "criteria": DOC_GENRE}})["genre"]
+    return a["choice"], {k: round(v, 3) for k, v in a["probabilities"].items()}
+
+
+# ---------- 2b. Jev: which units are verifiable claims about the code? ----------
 
 def classify(units, batch=12):
     def run(chunk):
@@ -128,12 +164,37 @@ def text_windows(files, size=40, step=25):
     return wins
 
 
+def is_symbol_path(f):
+    """Whether a name appearing in this file counts as the name still existing somewhere.
+
+    Wider than `is_code_path`: a manifest, a lock-free JSON config or a CI file is poor evidence
+    of behavior but perfectly good proof that an identifier has not been deleted. Only prose
+    documents are excluded, since a name surviving in the docs proves nothing about the code."""
+    p = Path(f)
+    return (p.suffix.lower() not in {".md", ".markdown", ".rst", ".txt", ".adoc"}
+            and p.name not in NOT_CODE_NAMES
+            and not SKIP_DIRS & set(p.parts))
+
+
+def is_code_path(f):
+    """Whether this path holds source the docs could be describing.
+
+    Narrower than `is_symbol_path` on purpose: this decides what the model is shown as evidence,
+    and a marketplace listing or a package manifest mostly restates the documentation, so a
+    disagreement with one is two documents disagreeing rather than the code contradicting a doc."""
+    p = Path(f)
+    return ((p.suffix in CODE_EXT or p.name in CODE_NAMES)
+            and p.name not in NOT_CODE_NAMES
+            and not SKIP_DIRS & set(p.parts)
+            and "test" not in p.name.lower())
+
+
 def code_windows(root, size=40, step=25):
     wins = []
     for p in sorted(Path(root).rglob("*")):
-        if p.suffix not in CODE_EXT or not p.is_file() or SKIP_DIRS & set(p.parts) or "test" in p.name.lower():
+        if not p.is_file() or not is_code_path(p.relative_to(root)):
             continue
-        if p.name in ("package-lock.json", "tsconfig.json") or p.stat().st_size > 400_000:
+        if p.stat().st_size > 400_000:
             continue
         lines = p.read_text(errors="ignore").splitlines()
         for s in range(0, max(1, len(lines) - size + step), step):
@@ -183,7 +244,7 @@ CRIT = {
 }
 
 
-def verify(claims, search, k=8):
+def verify(claims, search, k=8, symbol_corpus=None):
     def run(u):
         idents = re.findall(r"`([^`]+)`", " ".join(u["context"][-2:] + [u["text"]]))
         cands = search(" ".join(u["context"][-2:]) + " " + u["text"], k, boost=idents)
@@ -207,7 +268,7 @@ def verify(claims, search, k=8):
             u["p_contradicted"] = max([min(e["p"]["contradicted"], e["p"]["same"]) for e in ev], default=0.0)
             # policy lives in code: a confirmation anywhere outweighs a contradiction elsewhere
             # exact symbol existence is code's job, not the model's: Jev forgives a renamed identifier
-            u["missing_symbols"] = [s for s in re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"]) if s not in search.corpus]
+            u["missing_symbols"] = [s for s in re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"]) if s not in (symbol_corpus if symbol_corpus is not None else search.corpus)]
             leading = re.match(r"\W*`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])
             strong_conflict = u["p_contradicted"] >= 0.7 and u["p_contradicted"] > u["p_supported"]
             if u["missing_symbols"] and ((u["p_supported"] < 0.7 and u["p_contradicted"] >= 0.4)):

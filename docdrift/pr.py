@@ -16,11 +16,8 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from docdrift.core import USAGE, bm25, classify, doc_units, text_windows, verify  # noqa: E402
-
-CODE_EXT = {".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".rb", ".java", ".json", ".toml", ".yaml", ".yml"}
-NOT_CODE = {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "uv.lock", "tsconfig.json"}
-
+from docdrift.core import (USAGE, bm25, classify, classify_doc, doc_units, is_code_path,  # noqa: E402
+                           is_symbol_path, text_windows, verify)
 
 def git(repo, *args, check=True):
     r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, errors="ignore")
@@ -35,10 +32,7 @@ def blob(repo, rev, path):
 
 
 def is_code(f):
-    p = Path(f)
-    return (p.suffix in CODE_EXT and p.name not in NOT_CODE
-            and not re.search(r"(^|/)(tests?|__tests__|spec|node_modules|dist|build|vendor)(/|$)", f)
-            and "test" not in p.stem.lower())
+    return is_code_path(f) and not re.search(r"(^|/)(tests?|__tests__|spec|node_modules|dist|build|vendor)(/|$)", f)
 
 
 def main():
@@ -71,19 +65,37 @@ def main():
                              "\n".join(l[1:] for l in diff.split("\n")
                                        if l[:1] in "+-" and l[:3] not in ("+++", "---"))))
 
-    candidates = []
+    # Text first: find the lines this diff could possibly affect, and only ask the model about
+    # documents that have any. On a typical pull request that is one or two of them.
+    per_doc = {}
     for d in docs:
         text = blob(repo, a.head, d)
         if not text:
             continue
-        for u in doc_units(None, text=text):
-            if set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])) & touched:
-                u["doc"] = d
-                candidates.append(u)
+        hits = [u for u in doc_units(None, text=text)
+                if set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])) & touched]
+        if hits:
+            per_doc[d] = (text, hits)
+
+    candidates, skipped = [], []
+    for d, (text, hits) in per_doc.items():
+        genre, probs = classify_doc(d, text)
+        if genre == "third_party" and probs["third_party"] >= 0.5:
+            # A write-up of someone else's protocol names their functions, not ours. Checking it
+            # against this repository's code only produces "that symbol does not exist" noise.
+            skipped.append(d)
+            continue
+        for u in hits:
+            u["doc"], u["genre"] = d, genre
+            candidates.append(u)
     stats["claims_touched"] = len(candidates)
+    stats["docs_skipped_third_party"] = len(skipped)
     if not candidates:
-        Path(a.report).write_text("### Doc drift check\n\nNo documented claim mentions anything this diff touched.\n")
-        print("No documented claim mentions anything this diff touched.")
+        note = ("Only third-party documentation mentions what this diff touched: "
+                + ", ".join(f"`{d}`" for d in skipped)) if skipped else \
+               "No documented claim mentions anything this diff touched."
+        Path(a.report).write_text(f"### Doc drift check\n\n{note}\n")
+        print(note)
         return 0
 
     classify(candidates)
@@ -111,14 +123,15 @@ def main():
     def in_tree(rev, sym):
         if (rev, sym) not in seen:
             hits = git(repo, "grep", "-l", "-F", "--", sym, rev, check=False).split("\n")
-            seen[(rev, sym)] = any(is_code(h.split(":", 1)[-1]) for h in hits if h.strip())
+            seen[(rev, sym)] = any(is_symbol_path(h.split(":", 1)[-1]) for h in hits if h.strip())
         return seen[(rev, sym)]
 
     findings = []
     for u in post:
         was = pre.get((u["doc"], u["line"]), {}).get("status", "absent")
-        u["vanished"] = [s for s in re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])
-                         if s in touched and in_tree(a.base, s) and not in_tree(a.head, s)]
+        u["vanished"] = [] if u["genre"] == "specification" else [
+            s for s in re.findall(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", u["text"])
+            if s in touched and in_tree(a.base, s) and not in_tree(a.head, s)]
         if u["vanished"] or (u["status"] == "DRIFT" and was != "DRIFT"):
             u["before"] = was
             findings.append(u)
@@ -148,6 +161,13 @@ def main():
     else:
         lines.append(f"No documentation went stale. Checked **{stats['claims_verified']}** "
                      f"{'claim' if stats['claims_verified'] == 1 else 'claims'} that mention something this diff touched.")
+    specs = sorted({u["doc"] for u in claims if u["genre"] == "specification"})
+    if specs:
+        lines += ["", "<sub>" + ", ".join(f"`{d}`" for d in specs) + " read as specifications rather than "
+                  "reference docs. They may describe behavior on purpose ahead of the code, so a missing "
+                  "symbol there is not reported and prose claims are often left unverified.</sub>"]
+    if skipped:
+        lines += ["", "<sub>Skipped as third-party documentation: " + ", ".join(f"`{d}`" for d in skipped) + ".</sub>"]
     lines += ["", f"<sub>{dict(stats)} · {USAGE['requests']} model requests</sub>"]
     Path(a.report).write_text("\n".join(lines) + "\n")
 

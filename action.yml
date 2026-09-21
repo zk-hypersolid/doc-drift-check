@@ -18,6 +18,10 @@ inputs:
     description: Fail the job when the check finds stale documentation.
     required: false
     default: 'false'
+  code-extensions:
+    description: 'Space-separated file extensions to treat as implementation, overriding the default set. Widen it when your project keeps behavior somewhere unusual.'
+    required: false
+    default: ''
   max-claims:
     description: Cap on how many documented claims one run verifies.
     required: false
@@ -39,6 +43,7 @@ runs:
       shell: bash
       env:
         TYPESAFE_API_KEY: ${{ inputs.api-key }}
+        DOCDRIFT_CODE_EXT: ${{ inputs.code-extensions }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |

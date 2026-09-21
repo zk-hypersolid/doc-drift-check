@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from docdrift import core, pr  # noqa: E402
 
+GENRE = "reference"   # a test can set this to exercise the document-level gate
+
 # (doc fragment, code fragment) pairs a test declares in conflict. The verdict has to depend on
 # the code excerpt as well as the doc line, because the checker asks the same question about the
 # code before the change and after it, and only reports a claim whose answer flipped.
@@ -21,6 +23,11 @@ def fake_ask(state, questions):
     questions from CONFLICTING so a test controls the verdict without a network call."""
     out = {}
     for qid, q in questions.items():
+        if qid == "genre":
+            probs = {g: (0.85 if g == GENRE else 0.05) for g in
+                     ("reference", "specification", "third_party", "process")}
+            out[qid] = {"type": "choice", "choice": GENRE, "confidence": 0.9, "probabilities": probs}
+            continue
         if q["type"] == "choice":
             out[qid] = {"type": "choice", "choice": "code_fact", "confidence": 0.9,
                         "probabilities": {"code_fact": 0.9, "external_service": 0.03,
@@ -66,6 +73,8 @@ class Pipeline(unittest.TestCase):
     """Build a throwaway repository, make a change, and run the check over it."""
 
     def setUp(self):
+        global GENRE
+        GENRE = "reference"
         CONFLICTING.clear()  # each test declares its own conflicts
         self._real_ask, core.ask = core.ask, fake_ask
         self.tmp = tempfile.TemporaryDirectory()
@@ -152,6 +161,25 @@ class Pipeline(unittest.TestCase):
         self.commit("unrelated internal tweak")
         _, report = self.check()
         self.assertIn("No documented claim mentions", report)
+
+    def test_third_party_documentation_is_skipped(self):
+        global GENRE
+        GENRE = "third_party"
+        self.write("server.py", "def search(query, limit=10, include_trashed=False):\n    return []\n")
+        self.commit("rename the flag")
+        _, report = self.check()
+        # The doc describes someone else's system; its names are not ours to check.
+        self.assertIn("Only third-party documentation mentions", report)
+
+    def test_a_specification_does_not_report_a_missing_symbol(self):
+        global GENRE
+        GENRE = "specification"
+        self.write("server.py", "def search(query, limit=10, include_trashed=False):\n    return []\n")
+        self.commit("rename the flag")
+        _, report = self.check()
+        # A spec may name behavior the code has not caught up with, so absence proves nothing.
+        self.assertNotIn("removed or renamed", report)
+        self.assertIn("read as specifications", report)
 
     def test_fail_on_finding_controls_the_exit_code(self):
         CONFLICTING.append(("default: 10", "limit=25"))

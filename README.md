@@ -50,6 +50,7 @@ Get a key at [typesafe.ai](https://typesafe.ai) and store it as a repository sec
 | `docs` | root `*.md` and `docs/**.md` | Space-separated docs to check. Docs edited in the same pull request are always skipped. |
 | `comment` | `true` | Post the report as one pull-request comment, edited in place on later pushes. |
 | `fail-on-finding` | `false` | Fail the job when something is found. Start with `false`. |
+| `code-extensions` | see below | Space-separated extensions to treat as implementation. Widen it if your project keeps behavior somewhere unusual. |
 | `max-claims` | `60` | Cap on claims verified per run. |
 
 The job also writes the report to the run summary and emits a `::warning` annotation per finding,
@@ -88,6 +89,35 @@ python3 -m unittest discover -s tests   # no network, no dependencies
 
 The suite stubs out the model and covers document parsing, which lines a diff puts in scope, the
 deterministic symbol rules, the before/after policy and the rendered report.
+
+### What counts as code
+
+Two different corpora, because they answer different questions.
+
+**Evidence** — what the model is shown — is implementation: source files in about forty languages,
+plus shell scripts, SQL, systemd units, Dockerfiles and config. JSON is deliberately excluded by
+default: a `server.json`, a `manifest.json` or a marketplace listing mostly restates the
+documentation in another format, so a disagreement with one is two documents disagreeing rather
+than the code contradicting a doc. Override with `code-extensions` if your project is different.
+
+**Symbol existence** — whether a name the docs mention still exists anywhere — searches every
+tracked file except prose. A name surviving in a config file or a manifest is proof it was not
+deleted; a name surviving in the docs proves nothing.
+
+### Document genre
+
+Before checking a document the action asks what kind of document it is, once:
+
+- **reference** — documents this project's current interface. Checked normally.
+- **specification** — states what the system *should* do. Still checked, but a missing symbol is
+  not reported, because a spec is allowed to run ahead of the code.
+- **third_party** — about another protocol, a competitor or a vendor's API. Skipped: its names
+  belong to somebody else's system.
+- **process** — contributing, governance, decision records. Checked normally.
+
+This gate exists because the first real-world run on a specification-heavy repository produced
+two false alarms, both traceable to treating a competitor write-up and a systemd unit the way it
+treats an API reference.
 
 ## How it works
 
