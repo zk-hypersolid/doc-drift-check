@@ -136,6 +136,9 @@ def main():
             u["before"] = was
             findings.append(u)
     stats["findings"] = len(findings)
+    for u in post:
+        if u["status"] == "unknown":
+            stats["unknown_" + u["unknown_reason"]] += 1
 
     lines = ["### Doc drift check", ""]
     if findings:
@@ -161,6 +164,10 @@ def main():
     else:
         lines.append(f"No documentation went stale. Checked **{stats['claims_verified']}** "
                      f"{'claim' if stats['claims_verified'] == 1 else 'claims'} that mention something this diff touched.")
+    if stats["unknown_undecided"]:
+        n = stats["unknown_undecided"]
+        lines += ["", f"<sub>{n} {'claim' if n == 1 else 'claims'} could not be decided either way against the "
+                  "changed code and may be worth a look.</sub>"]
     specs = sorted({u["doc"] for u in claims if u["genre"] == "specification"})
     if specs:
         lines += ["", "<sub>" + ", ".join(f"`{d}`" for d in specs) + " read as specifications rather than "

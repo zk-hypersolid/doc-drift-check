@@ -69,6 +69,25 @@ class Parsing(unittest.TestCase):
                          ["The server reads the port from the environment."])
 
 
+class UnknownReasons(unittest.TestCase):
+    def claim(self, text, genre, same):
+        return {"text": text, "genre": genre, "evidence": [{"p": {"same": same}}]}
+
+    def test_prose_in_a_specification_has_no_anchor(self):
+        self.assertEqual(core.unknown_reason(self.claim("Payouts go only to the holder.", "specification", 0.9)),
+                         "prose_spec")
+
+    def test_nothing_relevant_retrieved(self):
+        self.assertEqual(core.unknown_reason(self.claim("`limit` defaults to 10.", "reference", 0.2)), "no_match")
+
+    def test_relevant_code_found_but_verdict_unclear(self):
+        self.assertEqual(core.unknown_reason(self.claim("`limit` defaults to 10.", "reference", 0.8)), "undecided")
+
+    def test_an_anchored_line_in_a_specification_is_still_judged_on_retrieval(self):
+        self.assertEqual(core.unknown_reason(self.claim("`limit` must default to 10.", "specification", 0.1)),
+                         "no_match")
+
+
 class Pipeline(unittest.TestCase):
     """Build a throwaway repository, make a change, and run the check over it."""
 

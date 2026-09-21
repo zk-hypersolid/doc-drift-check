@@ -279,4 +279,27 @@ def verify(claims, search, k=8, symbol_corpus=None):
                 u["status"] = "ok"
             else:
                 u["status"] = "unknown"
+                u["unknown_reason"] = unknown_reason(u)
     return claims
+
+
+UNKNOWN_REASONS = {
+    "prose_spec": "a requirement stated in prose, with no code name to anchor it; not expected to map onto one place in the code",
+    "no_match": "no code about this was found; it may be unbuilt, implemented somewhere not scanned, or not a claim about code at all",
+    "undecided": "code about this was found, but it neither clearly confirms nor contradicts the line; worth a human look",
+}
+
+
+def unknown_reason(u):
+    """Why a claim could not be judged, from answers already collected — no extra request.
+
+    `same` says whether an excerpt is about the thing the line describes, so it separates
+    "nothing relevant was retrieved" from "relevant code was found and the verdict is unclear".
+    Those call for different follow-ups: the first is a retrieval or scope question, the second
+    is the only kind worth putting in front of a person."""
+    anchored = re.search(r"`[A-Za-z_][A-Za-z0-9_]{2,}`", u["text"])
+    if u.get("genre") == "specification" and not anchored:
+        return "prose_spec"
+    if max((e["p"]["same"] for e in u["evidence"]), default=0.0) < 0.5:
+        return "no_match"
+    return "undecided"
